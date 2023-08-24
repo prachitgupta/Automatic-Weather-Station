@@ -1,0 +1,264 @@
+#include <SoftwareSerial.h> 
+#include <ThreeWire.h>  
+#include <RtcDS1302.h>
+#include "DHT.h"
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <SD.h>
+#include <SPI.h>
+
+
+SoftwareSerial rg(26, 27); // RX=26 , TX =27
+#define DHTPIN2 25
+#define DHTTYPE2 DHT22
+float temp,humidity,rainfall = 0;
+String dateTime,dataString,date;
+const int sensorPin = 14;
+int sensorValue = 0; //Variable stores the value direct from the analog pin
+float sensorVoltage = 0; //Variable that stores the voltage (in Volts) from the anemometer being sent to the analog pin
+float windSpeed = 0; // Wind speed in meters per second (m/s)
+File dataFile;
+float voltageConversionConstant = .004882814; //This constant maps the value provided from the analog read function, which ranges from 0 to 1023, to actual voltage, which ranges from 0V to 5V
+int sensorDelay = 250; //Delay between sensor readings, measured in milliseconds (ms)
+int month, day, year, hour, minute, second = 0;
+ 
+//Anemometer Technical Variables
+//The following variables correspond to the anemometer sold by Adafruit, but could be modified to fit other anemometers.
+ 
+float voltageMin = .4; // Mininum output voltage from anemometer in mV.
+float windSpeedMin = 0; // Wind speed in meters/sec corresponding to minimum voltage
+ 
+float voltageMax = 2.0; // Maximum output voltage from anemometer in mV.
+float windSpeedMax = 32; // Wind speed in meters/sec corresponding to maximum voltage
+
+unsigned long previous = second;
+unsigned long previous_day = 0;
+unsigned long interval = 30;  // 30s minutes in milliseconds
+unsigned long saveInterval = 120000;  // 24 hours in milliseconds
+
+ThreeWire myWire(15,21,2); // IO, SCLK, CE
+RtcDS1302<ThreeWire> Rtc(myWire);
+
+DHT dht2(DHTPIN2,DHTTYPE2);
+
+
+void setup() {
+  
+  Serial.begin(9600);
+
+  //rg15 setup
+  rg.begin(9600);
+
+  //dht22 setup
+  dht2.begin();
+
+  //rtc setup plus debug
+    Serial.print("compiled: ");
+    Serial.print(__DATE__);
+    Serial.println(__TIME__);
+
+    Rtc.Begin();
+
+    RtcDateTime compiled = RtcDateTime(__DATE__, __TIME__);
+    getDateTime(compiled);
+    Serial.println();
+
+    if (!Rtc.IsDateTimeValid()) 
+    {
+        // Common Causes:
+        //    1) first time you ran and the device wasn't running yet
+        //    2) the battery on the device is low or even missing
+
+        Serial.println("RTC lost confidence in the DateTime!");
+        Rtc.SetDateTime(compiled);
+    }
+
+    if (Rtc.GetIsWriteProtected())
+    {
+        Serial.println("RTC was write protected, enabling writing now");
+        Rtc.SetIsWriteProtected(false);
+    }
+
+    if (!Rtc.GetIsRunning())
+    {
+        Serial.println("RTC was not actively running, starting now");
+        Rtc.SetIsRunning(true);
+    }
+
+    RtcDateTime now = Rtc.GetDateTime();
+    if (now < compiled) 
+    {
+        Serial.println("RTC is older than compile time!  (Updating DateTime)");
+        Rtc.SetDateTime(compiled);
+    }
+    else if (now > compiled) 
+    {
+        Serial.println("RTC is newer than compile time. (this is expected)");
+    }
+    else if (now == compiled) 
+    {
+        Serial.println("RTC is the same as compile time! (not expected but all is fine)");
+    }
+
+      // SD Card Initialization
+   if (!SD.begin(5)) {
+    Serial.println("SD card initialization failed!");
+    return;
+  }
+
+  // Create a new file for logging
+  String filename = getFileName();
+ File dataFile = SD.open(filename,FILE_WRITE);
+  if(!dataFile) {
+    Serial.println("File doens't exist");
+    Serial.println("Creating file...");
+    writeFile(SD, filename.c_str(), "Date   Hour   Temperature   Rainfall   Windspeed \r\n");
+  }
+  else {
+    Serial.println("File already exists");  
+  }
+  dataFile.close();
+  
+}
+
+
+void writeFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Writing file: %s\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("Failed to open file for writing");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("File written");
+    } else {
+        Serial.println("Write failed");
+    }
+    file.close();
+}
+
+void appendFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Appending to file: %s\n", path);
+
+    File dataFile = fs.open(path, FILE_APPEND);
+    if(!dataFile){
+        Serial.println("Failed to open file for appending");
+        return;
+    }
+    if(dataFile.print(message)){
+        Serial.println("Message appended");
+    } else {
+        Serial.println("Append failed");
+    }
+    dataFile.close();
+}
+
+float annemometer(){
+    sensorValue = analogRead(sensorPin); //Get a value between 0 and 1023 from the analog pin connected to the anemometer
+    sensorVoltage = sensorValue * voltageConversionConstant; //Convert sensor value to actual voltage
+    //Convert voltage value to wind speed using range of max and min voltages and wind speed for the anemometer
+    if (sensorVoltage < voltageMin){
+     windSpeed = 0; //Check if voltage is below minimum value. If so, set wind speed to zero.
+    }else {
+      windSpeed = (sensorVoltage - voltageMin)*windSpeedMax/(voltageMax - voltageMin);
+    }
+   return windSpeed;
+}
+
+float rg15_data(){
+  rg.write('r');
+  rg.write('\n');
+  String response = rg.readStringUntil('\n');
+  char acc[7], eventAcc[7], totalAcc[7], rInt[7], unit[4];
+  sscanf (response.c_str(),"%*s %s %[^,] , %*s %s %*s %*s %s %*s %*s %s", &acc, &unit, &eventAcc, &totalAcc, &rInt);
+  rainfall = atof (acc);
+
+  
+  return rainfall;
+}
+String getFileName() {
+  String fileName;
+  int index = dateTime.indexOf(' ');
+  date = dateTime.substring(0, index);
+  date = date.substring(0,2) + "-" + date.substring(3,5) + "-" + date.substring(6,10);
+  fileName += "/" + date;
+  fileName += ".txt";
+  return fileName;
+}
+
+void saveData(){
+  // Append data to the file
+  RtcDateTime now = Rtc.GetDateTime();
+  
+  //unsigned long currentMillis = millis();
+  if (second - previous >= interval) {
+    previous = second;
+    String filename = getFileName();
+   appendFile(SD, filename.c_str(), dataString.c_str());
+  }
+
+  /* if it's time to save and close the file
+  if ( day != previous_day ) {
+    previous_day = day;
+    dataFile.close();
+    Serial.println("File saved and closed.");
+    
+    }
+   */
+}
+
+
+void updateDateTime(const RtcDateTime& dt)
+{
+    month  =   dt.Month();
+    day    =   dt.Day();
+    year   =   dt.Year();
+    hour   =   dt.Hour();
+    minute =   dt.Minute();
+    second =   dt.Second();
+    
+}
+
+String getDateTime(const RtcDateTime& dt){
+  char datestring[20];
+    
+    snprintf_P(datestring, 
+            countof(datestring),
+            PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
+            dt.Month(),
+            dt.Day(),
+            dt.Year(),
+            dt.Hour(),
+            dt.Minute(),
+            dt.Second() );
+    return datestring;
+}
+    
+
+void loop() {
+  //temp rainfall humidity and wind speed
+  rainfall = rg15_data();
+  temp = dht2.readTemperature();
+  humidity = dht2.readHumidity();
+  windSpeed = annemometer();
+ 
+
+  RtcDateTime now = Rtc.GetDateTime();
+
+  dateTime = getDateTime(now);
+  updateDateTime(now);
+
+  if (!now.IsValid())
+  {
+      // Common Causes:
+      //    1) the battery on the device is low or even missing and the power line was disconnected
+      Serial.println("RTC lost confidence in the DateTime!");
+  }
+  //integrate
+  dataString = dateTime + " " + String(temp) + " " + String(humidity) + " " + String(rainfall) + " " + String(windSpeed) + "\n";
+  saveData();
+ // delay(5000); // five seconds
+}
+ 
