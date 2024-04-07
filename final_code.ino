@@ -20,8 +20,8 @@ int waitingTime = 30000; //
 SoftwareSerial rg(26, 27); // RX=26 , TX =27
 #define DHTPIN2 25
 #define DHTTYPE2 DHT22
-#define esp_trans 32
-#define rg15_trans 33
+#define esp_trans 16
+#define rg15_trans 17
 float temp,humidity,rainfall = 0;
 String dateTime,dataString,date;
 const int sensorPin = 33;
